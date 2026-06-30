@@ -51,8 +51,7 @@ def normalize_question(question: str) -> str:
     q = question.lower()
     q = re.sub(r"[^\w\s]", "", q)       # strip punctuation
     q = re.sub(r"\s+", " ", q).strip()  # collapse spaces
-    words = sorted(q.split())            # sort for reorder-insensitivity
-    return " ".join(words)
+    return q
 
 
 def question_hash(question: str) -> str:
@@ -75,18 +74,21 @@ def estimate_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _cache_path(project_root: Optional[str] = None) -> Path:
-    """Resolve cache file path. Looks for project root (has .git or .pcg)."""
+    """Resolve cache file path. Global cache at ~/.thinkgraph/cache.json,
+    with project-local override if .pcg/ exists."""
+    # Project-local override
     if project_root:
         return Path(project_root) / CACHE_FILE
 
-    # Walk up from cwd looking for .git or .pcg
     current = Path.cwd()
     for parent in [current] + list(current.parents):
-        if (parent / ".git").exists() or (parent / ".pcg").exists():
+        if (parent / ".pcg").exists():
             return parent / CACHE_FILE
 
-    # Fallback to cwd
-    return Path.cwd() / CACHE_FILE
+    # Global default
+    global_dir = Path.home() / ".thinkgraph"
+    global_dir.mkdir(parents=True, exist_ok=True)
+    return global_dir / CACHE_FILE
 
 
 def _load_cache(project_root: Optional[str] = None) -> Dict[str, Any]:
@@ -238,23 +240,27 @@ def validate_dag(dag: Dict[str, Any]) -> List[List[str]]:
             f"Cycle detected involving nodes: {missing}"
         )
 
-    # Depth check
+    max_depth_reached = _calc_depth(nodes) if node_ids else 0
+
+    return batches
+
+
+def _calc_depth(nodes: List[Dict[str, Any]]) -> int:
+    """Calculate max depth of a DAG's nodes list."""
     depth_map: Dict[str, int] = {}
 
     def _depth(nid: str) -> int:
         if nid in depth_map:
             return depth_map[nid]
-        node = next(n for n in nodes if n["id"] == nid)
-        if not node["deps"]:
+        node = next((n for n in nodes if n["id"] == nid), None)
+        if not node or not node["deps"]:
             depth_map[nid] = 0
             return 0
-        d = 1 + max(_depth(dep) for dep in node["deps"])
+        d = 1 + max((_depth(dep) for dep in node["deps"]), default=0)
         depth_map[nid] = d
         return d
 
-    max_depth_reached = max((_depth(nid) for nid in node_ids), default=0) if node_ids else 0
-
-    return batches
+    return max((_depth(n["id"]) for n in nodes), default=0) if nodes else 0
 
 
 def validate_dag_file(filepath: str, max_depth: int = DEFAULT_MAX_DEPTH) -> dict:
@@ -269,37 +275,20 @@ def validate_dag_file(filepath: str, max_depth: int = DEFAULT_MAX_DEPTH) -> dict
         raise DAGValidationError(f"Invalid JSON: {e}")
 
     batches = validate_dag(dag)
-
-    # Check depth
     nodes = dag.get("nodes", [])
-    depth_map2: Dict[str, int] = {}
+    actual_depth = _calc_depth(nodes)
 
-    def _depth2(nid: str) -> int:
-        if nid in depth_map2:
-            return depth_map2[nid]
-        node = next(n for n in nodes if n["id"] == nid)
-        if not node["deps"]:
-            depth_map2[nid] = 0
-            return 0
-        d = 1 + max(_depth2(dep) for dep in node["deps"])
-        depth_map2[nid] = d
-        return d
-
-    if nodes:
-        actual_depth = max(_depth2(n["id"]) for n in nodes)
-        if actual_depth > max_depth:
-            raise DAGValidationError(
-                f"Depth {actual_depth} exceeds max {max_depth}"
-            )
-
-    actual_max_depth = max((_depth2(n["id"]) for n in nodes), default=0) if nodes else 0
+    if actual_depth > max_depth:
+        raise DAGValidationError(
+            f"Depth {actual_depth} exceeds max {max_depth}"
+        )
 
     return {
         "valid": True,
         "node_count": len(nodes),
         "batch_count": len(batches),
         "batches": batches,
-        "max_depth_reached": actual_max_depth,
+        "max_depth_reached": actual_depth,
     }
 
 

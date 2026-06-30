@@ -1,55 +1,32 @@
-# thinkgraph — Pre-Computation Graph
+# thinkgraph — Structured Decomposition Protocol
 
 Paste the following into your AGENTS.md file.
 
 ---
 
-## Structured Decomposition Protocol (thinkgraph)
+For complex, multi-hop, or constraint-satisfaction prompts, decompose before answering.
 
-For complex, multi-hop, or constraint-satisfaction prompts, follow this protocol before answering.
+**Skip** if: single factual lookup, single inference step, chitchat, small code edits.
 
-### Trigger conditions
+**Protocol:**
 
-Activate when the prompt:
-- Requires combining 2+ independent facts
-- Involves constraint satisfaction or trade-offs
-- Asks for a plan, analysis, evaluation, or comparison
+1. **Triage** — Classify: trivial | single-hop | multi-hop | planning | creative
+   - Trivial/single-hop/creative -> answer directly
+   - Borderline -> ask: "Run ThinkGraph? [Yes / Skip]"
 
-Skip for: simple lookups, single-hop questions, chitchat, small code changes.
+2. **Decompose** — Emit DAG: `{"nodes": [{"id": "Q1", "q": "atomic fact", "deps": []}]}`
+   - Each node = ONE fact, max 5, depth <= 2
+   - Auto-proceed (no approval needed)
 
-### Protocol (5 stages)
+3. **Resolve** — Topological order, check cache first, resolve each node:
+   - `{"claim": "...", "confidence": 0.0-1.0}`
+   - Low confidence (<0.6) -> ask user or skip
+   - Cache results, early exit if answer emerges
 
-**1. Triage** — Classify prompt complexity:
-- trivial/single-hop → answer directly
-- multi-hop/planning → enter decomposition pipeline
+4. **Synthesize** — Fact-sheet -> answer using ONLY verified facts:
+   - `Q1 -> [fact] (conf: 0.95)`
+   - Flag gaps and low-confidence items
 
-**2. Decompose** — Break into atomic sub-questions (DAG):
-```json
-{"nodes": [{"id": "Q1", "q": "one atomic fact", "deps": []}]}
-```
-- Max 5 nodes, max depth 2
-- Each node = ONE fact, not compound
-- Show proposed decomposition, wait for user approval
+5. **Present** — Answer with uncertainty notes if needed.
 
-**3. Resolve** — Answer each node in dependency order:
-- Leaf nodes (no deps) resolve first, can be parallelized
-- Each answer: `{"claim": "...", "confidence": 0.0-1.0}`
-- Low confidence (<0.6) → ask user or skip
-- Cache results for reuse
-
-**4. Synthesize** — Build fact-sheet, answer original prompt using ONLY verified facts:
-```
-Q1 → [fact] (conf: 0.95)
-Q2 → [fact] (conf: 0.72)
-```
-Flag gaps and low-confidence items.
-
-**5. Present** — Deliver answer with uncertainty notes if applicable.
-
-### Token budgets
-
-- Triage: ≤50 tokens
-- Decompose: ≤200 tokens
-- Per node: ≤300 tokens (in+out)
-- Synthesize: ≤600 tokens
-- Hard ceiling: 4× direct answer (abort to direct if exceeded)
+**Budgets:** Triage <=50 tok, Decompose <=200 tok, Per node <=300 tok, Synthesize <=600 tok, Ceiling = 4x direct cost.

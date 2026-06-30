@@ -4,51 +4,44 @@ This file goes in `.cursor/rules/thinkgraph.mdc` in your project root.
 
 ---
 
-## thinkgraph — Pre-Computation Graph
+## thinkgraph
 
-Use this protocol for complex, multi-hop, or constraint-satisfaction prompts. It decomposes the prompt into a dependency DAG of atomic facts, resolves them sequentially, and synthesizes a grounded answer.
+Structured decomposition for complex prompts. Forces fact-grounded answering before guessing.
 
-### When to activate
+### Skip if
 
-Activate when the prompt:
-- Requires combining 2+ independent facts
-- Involves constraint satisfaction or trade-offs
-- Asks for a plan, analysis, evaluation, or comparison
-- Has implicit dependencies between parts
+- Single factual lookup ("what is X?")
+- Single inference step
+- Chitchat or small code edits
 
-Skip for: simple factual lookups, single-hop questions, chitchat, small code changes.
-
-When uncertain, ask: **"Run ThinkGraph? [Yes / Yes, lite / Skip / Custom]"**
-
-### Workflow (5 stages)
+### Protocol (5 stages)
 
 **1. Triage** — Classify: trivial | single-hop | multi-hop | planning | creative
-- Trivial/single-hop → answer directly
-- Multi-hop/planning → enter pipeline
+- Trivial/single-hop/creative -> answer directly
+- Multi-hop/planning -> enter pipeline
+- Borderline -> ask: "Run ThinkGraph? [Yes / Skip]"
 
 **2. Decompose** — Emit DAG as JSON:
 ```json
-{"nodes": [{"id": "Q1", "q": "atomic question", "deps": []}]}
+{"nodes": [{"id": "Q1", "q": "one atomic fact", "deps": []}]}
 ```
-- Each node = ONE atomic fact
-- Max 5 nodes, max depth 2
-- Show user the proposed DAG, wait for approval
+- Each node = ONE fact, max 5 nodes, depth <= 2
+- Show proposed decomposition, auto-proceed (no approval needed)
 
 **3. Resolve** — For each node in topological order:
-- Check cache first (normalize → hash → lookup)
-- Resolve with: `{"claim": "...", "confidence": 0.0-1.0, "source": "internal"}`
-- Low confidence (<0.6) → ask user or web search
-- Cache results
-- Early termination if answer emerges
+- Check cache first (normalize -> hash -> lookup)
+- Resolve: `{"claim": "...", "confidence": 0.0-1.0}`
+- Low confidence (<0.6) -> ask user or skip
+- Cache results, early exit if answer emerges
 
-**4. Synthesize** — Condensed fact-sheet → final answer:
+**4. Synthesize** — Fact-sheet -> final answer using ONLY verified facts:
 ```
-Q1 → [claim] (conf: 0.95)
-Q2 → [claim] (conf: 0.72, derived from Q1)
+Q1 -> [fact] (conf: 0.95)
+Q2 -> [fact] (conf: 0.72)
 ```
-Use ONLY verified facts. Flag gaps and low-confidence items.
+Flag gaps and low-confidence items.
 
-**5. Present** — Direct answer if high-confidence. Uncertainty notes if any fact was low-confidence.
+**5. Present** — Answer with uncertainty notes if needed.
 
 ### Token budgets
 
@@ -58,7 +51,7 @@ Use ONLY verified facts. Flag gaps and low-confidence items.
 | Decompose | 200 |
 | Per node | 300 |
 | Synthesize | 600 |
-| Hard ceiling | 4× direct answer |
+| Ceiling | 4x direct cost |
 
 ### CLI (optional)
 
@@ -66,5 +59,4 @@ Use ONLY verified facts. Flag gaps and low-confidence items.
 python thinkgraph.py triage "prompt"
 python thinkgraph.py validate-dag graph.json
 python thinkgraph.py cache-get "question"
-python thinkgraph.py tokens "text"
 ```

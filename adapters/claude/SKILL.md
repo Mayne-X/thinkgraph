@@ -1,194 +1,95 @@
 ---
 name: thinkgraph
-description: Use for any complex, multi-hop, or constraint-satisfaction question. Decomposes the prompt into a dependency DAG of atomic facts, resolves them sequentially, and synthesizes a grounded answer. Gives 50%+ accuracy boost on hard prompts while minimizing token waste. Trigger on: "multi-step", "compare X and Y", "plan", "analyze", "evaluate", "design", or any prompt needing multiple facts to answer correctly.
+description: Use for complex, multi-hop, or constraint-satisfaction questions. Decomposes into a DAG of atomic facts, resolves them, synthesizes a grounded answer. Skip for trivial lookups, chitchat, or small code edits. Trigger on: compare, plan, analyze, evaluate, design, trade-off, or any prompt needing 2+ facts.
 ---
 
-# thinkgraph — Pre-Computation Graph
+# thinkgraph
 
-You MUST follow this protocol for complex prompts. It forces structured thinking before answering, preventing hallucination and missed constraints.
+Structured decomposition for complex prompts. Forces fact-grounded answering before guessing.
 
-## When to activate
+## Skip if
 
-**Always activate** for prompts that satisfy ANY of:
-- Requires combining 2+ independent facts
-- Involves constraint satisfaction or trade-offs
-- Asks for a plan, analysis, evaluation, or comparison
-- Has implicit dependencies between parts
-- Could be wrong if any sub-fact is assumed instead of verified
+- Single factual lookup ("what is X?")
+- Single inference step
+- Chitchat or small code edits
 
-**Skip entirely** for:
-- Simple factual lookups ("what is X?")
-- Single-hop questions with one answer
-- Conversational/chitchat
-- Explicit single-file edits or small code changes
+## Protocol
 
-When uncertain, ask the user: **"This looks complex enough for structured decomposition. Run ThinkGraph? [Yes, full pipeline / Yes, lite (max 3 nodes) / Skip — answer directly / Custom]"**
+### 1. Triage
 
-## Onboarding (first use per project)
+Classify: **trivial** | **single-hop** | **multi-hop** | **planning** | **creative**
 
-On first invocation, run these 5 questions. Store answers in `thinkgraph.config.json` (gitignored).
+Trivial/single-hop/creative -> answer directly, exit.
 
-```
-1. When should ThinkGraph activate?
-   [Auto-triage (smart detection) / Always-on / Trigger-words only / Off]
+If borderline, ask: **"Run ThinkGraph? [Yes / Skip]"**
 
-2. Max sub-questions (DAG nodes) per prompt?
-   [3 / 5 / 8 / Custom number]
+### 2. Decompose
 
-3. Low-confidence node handling?
-   [Auto-web-search / Ask me each time / Best-guess and flag / Skip the node]
+Emit a DAG of atomic sub-questions:
 
-4. Default final answer style?
-   [Match prompt style / Concise by default / Detailed by default / Custom]
-
-5. Helper CLI mode?
-   [Use if installed / Protocol-only (no CLI) / CLI required]
-```
-
-## Workflow
-
-### Stage 1: Triage
-
-Classify the prompt into one of:
-
-| Class | Criteria | Action |
-|---|---|---|
-| **trivial** | Single fact, no reasoning | Answer directly, exit |
-| **single-hop** | One inference step | Answer directly with brief reasoning |
-| **multi-hop** | 2-3 facts needed, some dependent | Enter full pipeline |
-| **planning** | Open-ended, many paths, constraint-heavy | Enter full pipeline |
-| **creative** | Subjective, no factual grounding | Answer directly (graph adds nothing) |
-
-If `thinkgraph CLI` is available and configured, run:
-```bash
-python thinkgraph.py triage "USER_PROMPT"
-```
-Otherwise, classify inline using the criteria above.
-
-If borderline between single-hop and multi-hop, **ask the user** (see above).
-
-### Stage 2: Decompose
-
-Break the prompt into a DAG of atomic sub-questions.
-
-**Output format** (JSON):
 ```json
-{
-  "nodes": [
-    {"id": "Q1", "q": "atomic sub-question 1", "deps": []},
-    {"id": "Q2", "q": "atomic sub-question 2", "deps": ["Q1"]},
-    {"id": "Q3", "q": "atomic sub-question 3", "deps": []}
-  ],
-  "edges": [["Q1", "Q2"], ["Q3", "Q2"]]
-}
+{"nodes": [{"id": "Q1", "q": "one atomic fact", "deps": []}]}
 ```
 
-**Constraints:**
-- Each node is ONE atomic fact. Not "explain X and Y" — split into "what is X" and "what is Y".
-- `deps` lists nodes that must resolve BEFORE this one (topological order).
-- Max nodes = user's configured budget (default 5).
-- Max depth = 2 (no recursive sub-sub-questions in v1).
-- If zero sub-questions are needed (the prompt is already atomic), answer directly.
-- Leaf nodes (no deps) can resolve in parallel. Dependent nodes resolve after their parents.
+Rules:
+- Each node = ONE fact, not compound
+- Max 5 nodes, depth <= 2
+- Leaf nodes resolve in parallel
+- If the prompt is already atomic, skip decomposition
 
-**Show the user the proposed DAG** before resolving:
+### 3. Resolve
 
-"Proposed decomposition (N sub-questions):
-1. Q1: [text] (independent)
-2. Q2: [text] (depends on Q1)
-3. Q3: [text] (independent)
+For each node in topological order:
+1. Check cache (normalize -> hash -> lookup)
+2. Resolve: `{"claim": "...", "confidence": 0.0-1.0, "source": "internal"}`
+3. If confidence < 0.6: ask user or skip
+4. Cache result
+5. Early exit if answer already emerges from resolved facts
 
-**[Approve all / Edit nodes / Regenerate / Add custom node / Remove a node]**"
+Budget: <=300 tokens per node (in+out).
 
-Wait for user response before proceeding.
+### 4. Synthesize
 
-### Stage 3: Resolve
-
-For each node, in topological order (parallelize independent nodes):
-
-1. **Check cache first.** Normalize the question → hash → look up in cache. If hit and confidence ≥ 0.8, reuse.
-2. **Resolve the node.** Send to LLM with this prompt:
-
+Build fact-sheet (one line per node), then answer using ONLY verified facts:
 ```
-Answer this atomic question in ≤150 tokens. Be precise and factual.
-Return EXACTLY this JSON format:
-{"claim": "your answer", "confidence": 0.0-1.0, "source": "internal|derived"}
-
-Question: {node.q}
-
-Context from parent answers: {parent_facts_if_any}
+Q1 -> [fact] (conf: 0.95)
+Q2 -> [fact] (conf: 0.72, derived from Q1)
 ```
 
-3. **If confidence < 0.6**, handle per user config:
-   - Auto-web-search: do a web search for this specific fact
-   - Ask me: present the sub-question to the user
-   - Best-guess: proceed but mark fact as uncertain in synthesis
-   - Skip: exclude this node and its dependents from synthesis
+- Flag gaps and low-confidence items
+- If budget exceeds 4x estimated direct cost, abort to direct answer
 
-4. **Store in cache.**
+### 5. Present
 
-5. **Early termination check.** After each batch, check: can the main answer already be formed from resolved facts? If yes, skip remaining nodes.
+- High confidence (all >= 0.8): answer directly
+- Low confidence present: append uncertainty note
+- Skipped nodes: note missing parts
 
-**Token budget per node:** ≤300 tokens total (prompt + response). Hard cap.
+## Token budgets
 
-### Stage 4: Synthesize
-
-Build a condensed fact-sheet from resolved nodes, then answer the original prompt.
-
-**Fact-sheet format** (one line per node):
-```
-Q1 → [claim] (conf: 0.95)
-Q2 → [claim] (conf: 0.72, derived from Q1)
-Q3 → [claim] (conf: 0.90)
-```
-
-**Synthesis prompt:**
-```
-You are given verified sub-facts about a complex question. Use ONLY these facts to answer the original prompt. If the facts are insufficient, explicitly say what is missing.
-
-VERIFIED FACTS:
-{fact_sheet}
-
-ORIGINAL QUESTION:
-{user_prompt}
-
-INSTRUCTIONS:
-- Base your answer strictly on the verified facts above.
-- If any fact has confidence < 0.8, note the uncertainty.
-- If critical facts are missing, say "I cannot fully answer because: [gap]".
-- Do NOT hallucinate additional facts beyond what is provided.
-```
-
-**Budget check:** If total tokens used exceed 4× a typical direct answer, abort pipeline and answer directly.
-
-### Stage 5: Present Answer
-
-- If all facts had confidence ≥ 0.8: present the answer directly.
-- If any fact had confidence < 0.8: append an uncertainty note.
-- If any node was skipped: note which parts are missing.
-
-## Token Budget Enforcement
-
-| Stage | Max tokens (output) |
+| Stage | Max |
 |---|---|
 | Triage | 50 |
 | Decompose | 200 |
-| Per node (in+out) | 300 |
+| Per node | 300 |
 | Synthesize | 600 |
-| **Hard ceiling** | **4× direct answer** |
+| Ceiling | 4x direct cost |
 
-## CLI Integration
-
-If the helper CLI is installed and configured, use these commands:
+## CLI (optional, install via `python install.py`)
 
 ```bash
 python thinkgraph.py triage "prompt"
-python thinkgraph.py decompose "prompt" --max-nodes 5 --max-depth 2
 python thinkgraph.py validate-dag graph.json
-python thinkgraph.py cache-get "normalized question"
-python thinkgraph.py cache-set "normalized question" "claim" 0.9
-python thinkgraph.py tokens "text to count"
+python thinkgraph.py cache-get "question"
+python thinkgraph.py tokens "text"
 python thinkgraph.py aggregate facts.json
 ```
 
-If the CLI is not installed, perform all operations inline using the pseudocode in `protocol/dag.md`.
+## Config (first use, stored in thinkgraph.config.json)
+
+```
+1. Activation: [Auto-triage / Always / Trigger-words / Off]
+2. Max nodes: [3 / 5 / 8 / Custom]
+3. Low-confidence: [Web search / Ask me / Best-guess / Skip]
+4. Answer style: [Match prompt / Concise / Detailed / Custom]
+```

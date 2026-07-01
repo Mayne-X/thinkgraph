@@ -1,62 +1,64 @@
 # thinkgraph.mdc — ThinkGraph Skill for Cursor
 
-This file goes in `.cursor/rules/thinkgraph.mdc` in your project root.
-
 ---
 
-## thinkgraph
+## thinkgraph — Pre-Computation Graph
 
-Structured decomposition for complex prompts. Forces fact-grounded answering before guessing.
+Use this protocol for complex, multi-hop, or constraint-satisfaction prompts. Includes self-consistency voting, web grounding (DuckDuckGo), and MCP server support.
 
-### Skip if
+### When to activate
 
-- Single factual lookup ("what is X?")
-- Single inference step
-- Chitchat or small code edits
+Activate when the prompt:
+- Requires combining 2+ independent facts
+- Involves constraint satisfaction or trade-offs
+- Asks for a plan, analysis, evaluation, or comparison
 
-### Protocol (5 stages)
+Skip for: simple factual lookups, single-hop questions, chitchat, small code changes.
+
+### Protocol (6 stages)
 
 **1. Triage** — Classify: trivial | single-hop | multi-hop | planning | creative
-- Trivial/single-hop/creative -> answer directly
-- Multi-hop/planning -> enter pipeline
-- Borderline -> ask: "Run ThinkGraph? [Yes / Skip]"
 
 **2. Decompose** — Emit DAG as JSON:
 ```json
 {"nodes": [{"id": "Q1", "q": "one atomic fact", "deps": []}]}
 ```
-- Each node = ONE fact, max 5 nodes, depth <= 2
-- Show proposed decomposition, auto-proceed (no approval needed)
+Max 5 nodes, depth ≤ 2.
 
-**3. Resolve** — For each node in topological order:
-- Check cache first (normalize -> hash -> lookup)
-- Resolve: `{"claim": "...", "confidence": 0.0-1.0}`
-- Low confidence (<0.6) -> ask user or skip
-- Cache results, early exit if answer emerges
+**3. Resolve** — Answer each node in topological order:
+- Check cache first
+- Return: `{"claim": "...", "confidence": 0.0-1.0}`
+- If confidence < 0.6 → web search: `thinkgraph.py web-search "query"`
 
-**4. Synthesize** — Fact-sheet -> final answer using ONLY verified facts:
+**4. Self-Consistency Voting** — On final answer:
+```bash
+thinkgraph.py vote "answer v1" "answer v2" "answer v3"
 ```
-Q1 -> [fact] (conf: 0.95)
-Q2 -> [fact] (conf: 0.72)
-```
-Flag gaps and low-confidence items.
 
-**5. Present** — Answer with uncertainty notes if needed.
+**5. Synthesize** — Fact-sheet → answer using ONLY verified facts.
+
+**6. Present** — Confidence notes + self-consistency note if used.
 
 ### Token budgets
 
-| Stage | Max |
-|---|---|
-| Triage | 50 |
-| Decompose | 200 |
-| Per node | 300 |
-| Synthesize | 600 |
-| Ceiling | 4x direct cost |
+- Triage: ≤50 | Decompose: ≤200 | Per node: ≤300 | Synthesize: ≤600
+- Hard ceiling: 4× direct answer
 
-### CLI (optional)
+### CLI commands
 
 ```bash
 python thinkgraph.py triage "prompt"
 python thinkgraph.py validate-dag graph.json
+python thinkgraph.py vote "r1" "r2" "r3"
+python thinkgraph.py web-search "query"
 python thinkgraph.py cache-get "question"
+python thinkgraph.py tokens "text"
 ```
+
+### MCP server
+
+```bash
+python mcp/thinkgraph_mcp.py
+```
+
+Tools: triage, validate-dag, vote, web-search, cache-get, cache-set, tokens

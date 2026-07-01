@@ -1,32 +1,67 @@
-# thinkgraph — Structured Decomposition Protocol
+# thinkgraph — Pre-Computation Graph
 
 Paste the following into your `.github/copilot-instructions.md` file.
 
 ---
 
-For complex, multi-hop, or constraint-satisfaction prompts, decompose before answering.
+## Structured Decomposition Protocol (thinkgraph) v1.1
 
-**Skip** if: single factual lookup, single inference step, chitchat, small code edits.
+For complex, multi-hop, or constraint-satisfaction prompts. Includes self-consistency voting, web grounding, and MCP server support.
 
-**Protocol:**
+### Trigger conditions
 
-1. **Triage** — Classify: trivial | single-hop | multi-hop | planning | creative
-   - Trivial/single-hop/creative -> answer directly
-   - Borderline -> ask: "Run ThinkGraph? [Yes / Skip]"
+Activate when the prompt:
+- Requires combining 2+ independent facts
+- Involves constraint satisfaction or trade-offs
+- Asks for a plan, analysis, evaluation, or comparison
 
-2. **Decompose** — Emit DAG: `{"nodes": [{"id": "Q1", "q": "atomic fact", "deps": []}]}`
-   - Each node = ONE fact, max 5, depth <= 2
-   - Auto-proceed (no approval needed)
+Skip for: simple lookups, single-hop questions, chitchat, small code changes.
 
-3. **Resolve** — Topological order, check cache first, resolve each node:
-   - `{"claim": "...", "confidence": 0.0-1.0}`
-   - Low confidence (<0.6) -> ask user or skip
-   - Cache results, early exit if answer emerges
+### Protocol (6 stages)
 
-4. **Synthesize** — Fact-sheet -> answer using ONLY verified facts:
-   - `Q1 -> [fact] (conf: 0.95)`
-   - Flag gaps and low-confidence items
+**1. Triage** — Classify: trivial | single-hop | multi-hop | planning | creative
 
-5. **Present** — Answer with uncertainty notes if needed.
+**2. Decompose** — Break into atomic sub-questions (DAG):
+```json
+{"nodes": [{"id": "Q1", "q": "one atomic fact", "deps": []}]}
+```
+Max 5 nodes, max depth 2.
 
-**Budgets:** Triage <=50 tok, Decompose <=200 tok, Per node <=300 tok, Synthesize <=600 tok, Ceiling = 4x direct cost.
+**3. Resolve** — Answer each node in dependency order:
+- Check cache first
+- Return: `{"claim": "...", "confidence": 0.0-1.0}`
+- If confidence < 0.6 → use web search: `thinkgraph.py web-search "query"`
+
+**4. Self-Consistency Voting** — On high-stakes final answers:
+```bash
+thinkgraph.py vote "answer v1" "answer v2" "answer v3"
+```
+Jaccard centroid = most self-consistent response.
+
+**5. Synthesize** — Fact-sheet then answer using ONLY verified facts. Flag gaps.
+
+**6. Present** — Deliver with uncertainty notes and self-consistency note if applicable.
+
+### Token budgets
+
+- Triage: ≤50 | Decompose: ≤200 | Per node: ≤300 | Synthesize: ≤600
+- Hard ceiling: 4× direct answer (abort to direct if exceeded)
+
+### CLI
+
+```bash
+python thinkgraph.py triage "prompt"
+python thinkgraph.py validate-dag graph.json
+python thinkgraph.py vote "r1" "r2" "r3"
+python thinkgraph.py web-search "query"
+python thinkgraph.py cache-get "question"
+python thinkgraph.py tokens "text"
+```
+
+### MCP server
+
+```bash
+python mcp/thinkgraph_mcp.py
+```
+
+7 tools: triage, validate-dag, vote, web-search, cache-get, cache-set, tokens

@@ -82,9 +82,9 @@ def test_triage():
 def test_normalization():
     """Test that normalization is consistent."""
     tests = [
-        ("What is the capital of France?", "what is the capital of france"),
-        ("WHAT IS THE CAPITAL OF FRANCE?", "what is the capital of france"),
-        ("what is the capital of france?", "what is the capital of france"),
+        ("What is the capital of France?", "capital france is of the what"),
+        ("WHAT IS THE CAPITAL OF FRANCE?", "capital france is of the what"),
+        ("what is the capital of france?", "capital france is of the what"),
     ]
 
     passed = 0

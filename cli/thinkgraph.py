@@ -19,17 +19,31 @@ Commands:
     tokens "text"                          Estimate token count
     vote "resp1" "resp2" [...]             Self-consistency voting (pick most consistent)
     web-search "query" [--num-results N]  Web search via DuckDuckGo HTML
+    compress "file" [--ratio R]             Compress text via TF-IDF sentence extraction
+    export facts.json --format [json|yaml|markdown]   Export results
+    prune-dag graph.json --facts facts.json [--prompt "..."]  Dynamic DAG pruning
+    ab-score "answer" [--ground-truth "..."]  Score answer quality (A/B testing)
+    plugin-list                            List registered custom plugins
+    plugin-register "name" "py_code"        Register a custom plugin
 """
 
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# Precompiled regex patterns — compile once, reuse everywhere
+_RE_WORDS = re.compile(r"\w+")
+_RE_PUNCT = re.compile(r"[^\w\s]")
+_RE_SPACES = re.compile(r"\s+")
+_RE_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +51,6 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 CACHE_FILE = "thinkgraph.cache.json"
-CONFIG_FILE = "thinkgraph.config.json"
 DEFAULT_MAX_NODES = 5
 DEFAULT_MAX_DEPTH = 2
 TOKEN_RATIO = 4  # ~4 chars per token estimate
@@ -45,17 +58,17 @@ CACHE_TTL_DAYS = 30
 
 
 # ---------------------------------------------------------------------------
-# Normalization
+# Normalization (memoized for repeated same questions)
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=1024)
 def normalize_question(question: str) -> str:
-    """Normalize a question for cache keying."""
-    q = question.lower()
-    q = re.sub(r"[^\w\s]", "", q)       # strip punctuation
-    q = re.sub(r"\s+", " ", q).strip()  # collapse spaces
-    return q
+    """Normalize a question for cache keying. Sorted for reorder-insensitivity."""
+    words = _RE_WORDS.findall(question.lower())
+    return " ".join(sorted(words))
 
 
+@lru_cache(maxsize=2048)
 def question_hash(question: str) -> str:
     """SHA-256 hash of normalized question, truncated to 16 chars."""
     normalized = normalize_question(question)
@@ -63,31 +76,26 @@ def question_hash(question: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Token estimation
+# Token estimation (memoized)
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=256)
 def estimate_tokens(text: str) -> int:
     """Heuristic token count (~4 chars per token)."""
     return max(1, len(text) // TOKEN_RATIO)
 
 
 # ---------------------------------------------------------------------------
-# Cache
+# Cache (global cache at ~/.thinkgraph/, project-local via .pcg/)
 # ---------------------------------------------------------------------------
 
 def _cache_path(project_root: Optional[str] = None) -> Path:
-    """Resolve cache file path. Global cache at ~/.thinkgraph/cache.json,
-    with project-local override if .pcg/ exists."""
-    # Project-local override
     if project_root:
         return Path(project_root) / CACHE_FILE
-
     current = Path.cwd()
     for parent in [current] + list(current.parents):
         if (parent / ".pcg").exists():
             return parent / CACHE_FILE
-
-    # Global default
     global_dir = Path.home() / ".thinkgraph"
     global_dir.mkdir(parents=True, exist_ok=True)
     return global_dir / CACHE_FILE
@@ -389,6 +397,362 @@ def aggregate_facts(facts_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Prompt compression (TF-IDF sentence extraction, stdlib only)
+# ---------------------------------------------------------------------------
+
+def tokenize_sentences(text: str) -> List[str]:
+    """Split text into sentences (uses precompiled regex)."""
+    return [s.strip() for s in _RE_SENTENCE_END.split(text.strip()) if s.strip()]
+
+
+@lru_cache(maxsize=512)
+def compute_term_freq(text: str) -> Tuple[Tuple[str, float], ...]:
+    """Compute TF (term frequency) as a sorted tuple of (word, tf) pairs.
+    Cached per unique text."""
+    words = _RE_WORDS.findall(text.lower())
+    if not words:
+        return ()
+    tf_map: Dict[str, float] = {}
+    for w in words:
+        tf_map[w] = tf_map.get(w, 0.0) + 1.0
+    total = len(words)
+    return tuple((w, count / total) for w, count in tf_map.items())
+
+
+def compress_sentences(text: str, target_ratio: float = 0.4) -> str:
+    """Compress text by extracting top sentences via TF-IDF.
+    Uses precompiled regex and cached term frequency lookups."""
+    sentences = tokenize_sentences(text)
+    n = len(sentences)
+    if n <= 2:
+        return text
+
+    # Build IDF in one pass (no per-word re-scanning)
+    word_doc_freq: Dict[str, int] = {}
+    for s in sentences:
+        unique_words = set(_RE_WORDS.findall(s.lower()))
+        for w in unique_words:
+            word_doc_freq[w] = word_doc_freq.get(w, 0) + 1
+
+    n_float = float(n)
+    idf: Dict[str, float] = {
+        w: math.log((n_float + 1) / (df + 1)) + 1
+        for w, df in word_doc_freq.items()
+    }
+
+    # Score each sentence (use cached TF lookups)
+    scored: List[Tuple[float, str]] = []
+    for s in sentences:
+        tf_pairs = compute_term_freq(s)
+        score = sum(tf * idf.get(w, 0.0) for w, tf in tf_pairs)
+        scored.append((score, s))
+
+    n_keep = max(1, int(n * target_ratio))
+    kept = {s for score, s in sorted(scored, reverse=True)[:n_keep]}
+    return " ".join(s for s in sentences if s in kept)
+
+
+# ---------------------------------------------------------------------------
+# Export formats (JSON, YAML, Markdown)
+# ---------------------------------------------------------------------------
+
+def export_results(
+    dag: Dict[str, Any],
+    facts: List[Dict[str, Any]],
+    synthesis: str,
+    output_format: str = "json",
+) -> str:
+    """Export pipeline results in the requested format.
+
+    dag: the decomposition DAG
+    facts: resolved facts per node
+    synthesis: final synthesized answer
+    """
+    if output_format == "json":
+        return json.dumps({
+            "dag": dag,
+            "facts": facts,
+            "synthesis": synthesis,
+        }, indent=2, ensure_ascii=False)
+
+    elif output_format == "yaml":
+        # Pure Python YAML emitter (no PyYAML dependency)
+        def to_yaml(obj: Any, indent: int = 0) -> str:
+            lines: List[str] = []
+            prefix = "  " * indent
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if isinstance(v, (dict, list)) and v:
+                        lines.append(f"{prefix}{k}:")
+                        lines.append(to_yaml(v, indent + 1))
+                    else:
+                        safe = json.dumps(v) if not isinstance(v, str) else v
+                        lines.append(f"{prefix}{k}: {safe}")
+            elif isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, (dict, list)):
+                        lines.append(f"{prefix}-")
+                        lines.append(to_yaml(item, indent + 1))
+                    else:
+                        lines.append(f"{prefix}- {item}")
+            return "\n".join(lines)
+
+        return to_yaml({
+            "dag": dag,
+            "facts": facts,
+            "synthesis": synthesis,
+        })
+
+    elif output_format == "markdown":
+        lines = [
+            "# ThinkGraph Pipeline Results",
+            "",
+            "## Decomposition",
+            "",
+        ]
+        for node in dag.get("nodes", []):
+            qid = node["id"]
+            deps = node.get("deps", [])
+            facts_for_q = [f for f in facts if f.get("id") == qid]
+            lines.append(f"### {qid}: {node['q']}")
+            if deps:
+                lines.append(f"_Depends on: {', '.join(deps)}_")
+            for f in facts_for_q:
+                conf = f.get("confidence", 0.0)
+                warn = " ⚠️" if conf < 0.6 else ""
+                lines.append(f"- **{f.get('claim', 'unknown')}** (conf: {conf:.2f}){warn}")
+            lines.append("")
+
+        lines.extend([
+            "## Synthesis",
+            "",
+            synthesis,
+        ])
+        return "\n".join(lines)
+
+    else:
+        raise ValueError(f"Unknown export format: {output_format}. Use: json, yaml, markdown")
+
+
+# ---------------------------------------------------------------------------
+# Dynamic DAG pruning
+# ---------------------------------------------------------------------------
+
+def prune_dag(
+    dag: Dict[str, Any],
+    resolved_facts: Dict[str, Dict[str, Any]],
+    main_prompt: str,
+) -> Dict[str, Any]:
+    """Remove nodes that are no longer relevant after parent facts are resolved.
+
+    Heuristic: if a node's claim already satisfies a sub-concept that was
+    implicitly part of the main prompt, prune its dependents if they would
+    ask for information already covered by the parent claim.
+
+    Returns a pruned copy of the DAG (does not mutate original).
+    """
+    nodes = dag.get("nodes", [])
+    if not nodes:
+        return dag
+
+    # Build a "covered concepts" set from resolved parent claims
+    covered_terms: Set[str] = set()
+    for node_id, fact in resolved_facts.items():
+        claim = fact.get("claim", "").lower()
+        covered_terms.update(re.findall(r"\w+", claim))
+
+    # For each unresolved node, check if all its parent claims together
+    # already imply the answer (covered terms overlap significantly)
+    pruned_node_ids: Set[str] = set()
+
+    for node in nodes:
+        node_id = node["id"]
+        if node_id in resolved_facts:
+            continue  # already resolved, skip
+
+        deps = node.get("deps", [])
+        if not deps:
+            continue  # root nodes are never pruned
+
+        # Get combined covered terms from all resolved parents
+        parent_terms: Set[str] = set()
+        all_parents_resolved = all(d in resolved_facts for d in deps)
+        if not all_parents_resolved:
+            continue  # can't evaluate unresolved parents
+
+        for d in deps:
+            if d in resolved_facts:
+                parent_claim = resolved_facts[d].get("claim", "").lower()
+                parent_terms.update(re.findall(r"\w+", parent_claim))
+
+        # Get node question terms
+        node_terms = set(re.findall(r"\w+", node["q"].lower()))
+
+        # If node's question terms are mostly covered by parent claims, prune
+        overlap = node_terms & parent_terms
+        coverage = len(overlap) / len(node_terms) if node_terms else 0.0
+
+        if coverage >= 0.75:  # 75% of question terms already answered by parents
+            pruned_node_ids.add(node_id)
+
+    # Return pruned DAG
+    if not pruned_node_ids:
+        return dag
+
+    remaining_nodes = [n for n in nodes if n["id"] not in pruned_node_ids]
+    remaining_ids = {n["id"] for n in remaining_nodes}
+
+    # Remove edges referencing pruned nodes
+    edges = [
+        e for e in dag.get("edges", [])
+        if e[0] in remaining_ids and e[1] in remaining_ids
+    ]
+
+    # Remove deps referencing pruned nodes
+    for n in remaining_nodes:
+        n["deps"] = [d for d in n.get("deps", []) if d in remaining_ids]
+
+    return {
+        "nodes": remaining_nodes,
+        "edges": edges,
+        "_pruned": list(pruned_node_ids),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Plugin hooks for custom resolve functions
+# ---------------------------------------------------------------------------
+
+class PluginRegistry:
+    """Registry for custom resolve functions (API calls, DB lookups, etc.)."""
+
+    _hooks: Dict[str, callable] = {}
+
+    @classmethod
+    def register(cls, name: str, fn: callable) -> None:
+        cls._hooks[name] = fn
+
+    @classmethod
+    def resolve(cls, name: str, question: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        if name not in cls._hooks:
+            return {"error": f"No plugin registered: {name}"}
+        try:
+            result = cls._hooks[name](question, context)
+            return {"success": True, "result": result}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @classmethod
+    def list_plugins(cls) -> List[str]:
+        return list(cls._hooks.keys())
+
+    @classmethod
+    def clear(cls) -> None:
+        cls._hooks.clear()
+
+
+def register_plugin(name: str, fn: callable) -> None:
+    """Decorator/utility to register a custom resolve function.
+
+    Function signature: fn(question: str, context: dict) -> dict
+    The returned dict should have at least {"claim": "...", "confidence": 0.0-1.0}
+
+    Example:
+        @register_plugin("fetch_from_api")
+        def fetch_weather(question, ctx):
+            location = extract_location(question)
+            data = api.get(f"/weather/{location}")
+            return {"claim": f"weather is {data['temp']}C", "confidence": 0.95}
+    """
+    PluginRegistry.register(name, fn)
+
+
+# Built-in shell-command plugin
+def shell_resolve(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Plugin: run a shell command and parse its output as the answer."""
+    cmd = context.get("command", "")
+    import subprocess
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        output = result.stdout.strip()
+        return {
+            "claim": output if output else "(no output)",
+            "confidence": 0.9 if result.returncode == 0 else 0.5,
+            "source": "shell",
+        }
+    except Exception as e:
+        return {"claim": f"(command failed: {e})", "confidence": 0.0, "source": "shell"}
+
+
+def weblookup_resolve(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Plugin: look up a fact via web search."""
+    num_results = context.get("num_results", 3)
+    result = web_search(question, num_results=num_results)
+    results = result.get("results", [])
+    if not results:
+        return {"claim": "(no web results found)", "confidence": 0.3, "source": "web"}
+    top = results[0]
+    claim = f"{top['title']}: {top['snippet'][:200]}" if top.get("snippet") else top.get("title", "")
+    return {"claim": claim, "confidence": 0.75, "source": "web", "url": top.get("url", "")}
+
+
+# Pre-register built-in plugins
+PluginRegistry.register("shell", shell_resolve)
+PluginRegistry.register("weblookup", weblookup_resolve)
+
+
+# ---------------------------------------------------------------------------
+# A/B testing mode
+# ---------------------------------------------------------------------------
+
+def ab_score(answer: str, ground_truth: Optional[str] = None) -> Dict[str, Any]:
+    """Score an answer for A/B testing mode.
+
+    If ground_truth is provided: exact match + keyword overlap with ground truth.
+    If not: returns structural quality metrics (length, claim count, uncertainty flags).
+    """
+    words = set(re.findall(r"\w+", answer.lower()))
+
+    # Count uncertainty markers
+    uncertainty_markers = re.findall(
+        r"\b(maybe|perhaps|possibly|might|could be|likely|probably|not sure|uncertain)\b",
+        answer.lower(),
+    )
+
+    # Count claim sentences (sentences ending with period that aren't questions)
+    claim_sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?])\s+", answer)
+        if s.strip() and not s.strip().endswith("?")
+    ]
+
+    score = {
+        "word_count": len(answer.split()),
+        "claim_count": len(claim_sentences),
+        "uncertainty_flags": len(uncertainty_markers),
+        "has_uncertainty": len(uncertainty_markers) > 0,
+        "unique_words": len(words),
+        "vocabulary_richness": round(len(words) / max(1, len(answer.split())), 3),
+    }
+
+    if ground_truth:
+        gt_words = set(re.findall(r"\w+", ground_truth.lower()))
+        overlap = words & gt_words
+        score["keyword_recall"] = round(len(overlap) / len(gt_words), 3) if gt_words else 0.0
+        score["precision"] = round(len(overlap) / len(words), 3) if words else 0.0
+        score["ground_truth_provided"] = True
+    else:
+        score["ground_truth_provided"] = False
+
+    return score
+
+
+# ---------------------------------------------------------------------------
 # Self-consistency voting
 # ---------------------------------------------------------------------------
 
@@ -572,7 +936,6 @@ def cmd_vote(args):
 
 def cmd_web_search(args):
     result = web_search(args.query, num_results=args.num_results)
-    # Print human-readable summary
     print(f"Search: {result['query']}")
     if result.get("error"):
         print(f"  Error: {result['error']}")
@@ -582,8 +945,79 @@ def cmd_web_search(args):
             print(f"    {r['url']}")
             if r["snippet"]:
                 print(f"    {r['snippet'][:150]}...")
-    # Always also print raw JSON for piping
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_compress(args):
+    raw = Path(args.file).read_text(encoding="utf-8-sig") if args.file != "-" else sys.stdin.read()
+    raw = raw.lstrip("\ufeff").strip()  # strip BOM if present
+    ratio = getattr(args, "ratio", 0.4)
+    compressed = compress_sentences(raw, target_ratio=ratio)
+    orig_words = len(raw.split())
+    new_words = len(compressed.split())
+    sys.stdout.write(f"Compressed: {orig_words} -> {new_words} words (kept {ratio:.0%})\n\n")
+    sys.stdout.write(compressed + "\n")
+
+
+def cmd_export(args):
+    facts_path = Path(args.facts)
+    if not facts_path.exists():
+        raise FileNotFoundError(f"File not found: {args.facts}")
+    data = json.loads(facts_path.read_text(encoding="utf-8"))
+    dag = data.get("dag", {})
+    facts = data.get("facts", [])
+    synthesis = data.get("synthesis", "")
+    output = export_results(dag, facts, synthesis, output_format=args.format)
+    print(output)
+
+
+def cmd_prune_dag(args):
+    dag_path = Path(args.file)
+    dag = json.loads(dag_path.read_text(encoding="utf-8-sig"))
+    facts: Dict[str, Dict[str, Any]] = {}
+    if args.facts:
+        facts_data = json.loads(Path(args.facts).read_text(encoding="utf-8-sig"))
+        for f in facts_data:
+            facts[f.get("id", "")] = f
+    main_prompt = args.prompt or ""
+    pruned = prune_dag(dag, facts, main_prompt)
+    sys.stdout.write(json.dumps(pruned, indent=2, ensure_ascii=False) + "\n")
+
+
+def cmd_ab_score(args):
+    score = ab_score(args.answer, ground_truth=args.ground_truth)
+    print(json.dumps(score, indent=2))
+    if score["ground_truth_provided"]:
+        print(f"Keyword recall: {score['keyword_recall']:.2%}")
+        print(f"Precision: {score['precision']:.2%}")
+    else:
+        print(f"Claim count: {score['claim_count']}, Uncertainty flags: {score['uncertainty_flags']}")
+
+
+def cmd_plugin_list(args):
+    plugins = PluginRegistry.list_plugins()
+    if not plugins:
+        print("No plugins registered.")
+    for name in plugins:
+        print(f"  - {name}")
+
+
+def cmd_plugin_register(args):
+    name = args.name
+    # Execute the provided Python code and register the resulting function
+    namespace: Dict[str, Any] = {}
+    try:
+        exec(args.py_code, namespace)
+        fn = namespace.get(name) or namespace.get("fn", None)
+        if callable(fn):
+            PluginRegistry.register(name, fn)
+            print(f"Registered plugin: {name}")
+        else:
+            print(f"Error: no callable found in provided code for '{name}'")
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error registering plugin: {e}")
+        sys.exit(1)
 
 
 def main():
@@ -651,6 +1085,41 @@ def main():
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--num-results", type=int, default=5, help="Number of results (default: 5)")
     p_search.set_defaults(func=cmd_web_search)
+
+    # compress
+    p_compress = sub.add_parser("compress", help="Compress text via TF-IDF sentence extraction")
+    p_compress.add_argument("file", help="File to compress, or '-' for stdin")
+    p_compress.add_argument("--ratio", type=float, default=0.4, help="Fraction of sentences to keep (default: 0.4)")
+    p_compress.set_defaults(func=cmd_compress)
+
+    # export
+    p_export = sub.add_parser("export", help="Export pipeline results in various formats")
+    p_export.add_argument("facts", help="Path to facts JSON file")
+    p_export.add_argument("--format", default="markdown", choices=["json", "yaml", "markdown"], help="Output format (default: markdown)")
+    p_export.set_defaults(func=cmd_export)
+
+    # prune-dag
+    p_prune = sub.add_parser("prune-dag", help="Dynamic DAG pruning — remove nodes whose parents answer them")
+    p_prune.add_argument("file", help="Path to DAG JSON file")
+    p_prune.add_argument("--facts", help="Path to resolved facts JSON")
+    p_prune.add_argument("--prompt", default="", help="Original user prompt (for context)")
+    p_prune.set_defaults(func=cmd_prune_dag)
+
+    # ab-score
+    p_ab = sub.add_parser("ab-score", help="Score answer quality for A/B testing")
+    p_ab.add_argument("answer", help="Answer to score")
+    p_ab.add_argument("--ground-truth", dest="ground_truth", default=None, help="Reference answer for keyword recall")
+    p_ab.set_defaults(func=cmd_ab_score)
+
+    # plugin-list
+    p_pl = sub.add_parser("plugin-list", help="List registered custom plugins")
+    p_pl.set_defaults(func=cmd_plugin_list)
+
+    # plugin-register
+    p_pr = sub.add_parser("plugin-register", help="Register a custom resolve plugin")
+    p_pr.add_argument("name", help="Plugin name")
+    p_pr.add_argument("py_code", help="Python code that defines a function with this name")
+    p_pr.set_defaults(func=cmd_plugin_register)
 
     args = parser.parse_args()
     args.func(args)

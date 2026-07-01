@@ -1,0 +1,71 @@
+name: ThinkGraph Issue Analyzer
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ThinkGraph
+        run: |
+          pip install -q .
+          python -c "from cli.thinkgraph import triage_heuristic; print('ThinkGraph ready')"
+
+      - name: Classify issue
+        id: triage
+        run: |
+          python cli/thinkgraph.py triage "${{ github.event.issue.title }}" > triage.json
+
+          CLASSIFICATION=$(python -c "
+          import json, sys
+          data = json.load(open('triage.json'))
+          print(data['classification'])
+          ")
+          echo "classification=$CLASSIFICATION" >> $GITHUB_OUTPUT
+          echo "title=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
+
+      - name: Add labels
+        uses: actions/cool-issues@v1
+        if: github.event_name == 'issues'
+        with:
+          labels: |
+            thinkgraph/${{ steps.triage.outputs.classification }}
+
+      - name: Comment analysis
+        if: github.event_name == 'issues'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const classification = '${{ steps.triage.outputs.classification }}';
+            const body = `
+              ## ThinkGraph Analysis
+
+              **Classification:** \`${{ steps.triage.outputs.classification }}\`
+
+              ${
+                classification === 'multi-hop' || classification === 'planning'
+                  ? '> This issue requires multi-step reasoning. Consider decomposing into sub-tasks using ThinkGraph before implementing.'
+                  : classification === 'trivial'
+                  ? '> This appears to be a straightforward issue. Addressing directly should work.'
+                  : '> This issue involves planning or analysis. ThinkGraph may help structure the approach.'
+              }
+
+              _Powered by [ThinkGraph](https://github.com/Mayne-X/thinkgraph) — Structured Decomposition for LLMs_
+            `;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

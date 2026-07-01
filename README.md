@@ -1,51 +1,32 @@
-<p align="center">
-  <h1 align="center">🧠 ThinkGraph</h1>
-  <p align="center">
-    <strong>Stop guessing. Start decomposing.</strong><br>
-    Structured decomposition for LLM prompts that gives your AI a foundation to think on.
-  </p>
-</p>
+# 🧠 ThinkGraph
 
-<p align="center">
-  <a href="https://github.com/Mayne-X/thinkgraph/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="#"><img src="https://img.shields.io/badge/python-3.8+-green.svg" alt="Python"></a>
-  <a href="#"><img src="https://img.shields.io/badge/agents-6+-purple.svg" alt="Agents"></a>
-  <a href="#"><img src="https://img.shields.io/badge/token--save-50%25+-red.svg" alt="Token Savings"></a>
-</p>
+<a href="https://github.com/Mayne-X/thinkgraph/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+<a href="#"><img src="https://img.shields.io/badge/python-3.8+-green.svg" alt="Python"></a>
+<a href="#"><img src="https://img.shields.io/badge/agents-6+-purple.svg" alt="Agents"></a>
+<a href="#"><img src="https://img.shields.io/badge/tests-29%2F29%20passing-yellow.svg" alt="Tests"></a>
+<a href="#"><img src="https://img.shields.io/badge/features-12%2F15-brightgreen.svg" alt="Features"></a>
+
+> **Stop guessing. Start decomposing.**
+> Structured decomposition for LLM prompts — breaks complex questions into a dependency graph of atomic facts, resolves them sequentially, and synthesizes a grounded answer.
 
 ---
 
 ## The Problem
 
-When you ask an LLM a complex question, it tries to answer the whole thing at once — hallucinating details, missing constraints, and guessing at facts it should verify first.
-
-**Example failure:**
-> "Compare React and Vue for a large enterprise dashboard with SSR requirements"
->
-> ❌ LLM guesses React is better without checking SSR maturity, enterprise adoption, team size trade-offs, or bundle size implications.
-
-## The Solution
-
-ThinkGraph **intercepts the prompt**, forces the LLM to break it into a dependency graph of atomic facts, resolves each one, then answers with a verified foundation.
+When you ask an LLM a complex question, it tries to answer the whole thing at once — hallucinating details, missing constraints, and guessing facts it should verify first.
 
 ```
-Your Prompt
-    │
-    ▼
-┌─────────┐     ┌───────────┐     ┌──────────┐     ┌────────────┐
-│ TRIAGE  │────>│ DECOMPOSE │────>│ RESOLVE  │────>│ SYNTHESIZE │
-│         │     │           │     │          │     │            │
-│ Is this │     │ Emit DAG  │     │ Answer   │     │ Build final│
-│ complex?│     │ of atomic │     │ each     │     │ answer from│
-│         │     │ sub-Qs    │     │ sub-Q    │     │ verified   │
-│ Skip if │     │ with deps │     │ in order │     │ facts only │
-│ simple  │     │           │     │          │     │            │
-└─────────┘     └───────────┘     └──────────┘     └────────────┘
-     │               │                 │                  │
-     ▼               ▼                 ▼                  ▼
-  Direct         User reviews     Cache results      Grounded
-  answer         proposed DAG     for reuse          answer with
-  (if trivial)                                       confidence
+❌ "Compare React and Vue for enterprise SSR dashboard"
+   → LLM guesses React is better without checking SSR maturity,
+     enterprise adoption, team size trade-offs, or bundle size.
+```
+
+ThinkGraph intercepts the prompt and forces structured thinking before answering:
+
+```
+✅ LLM first resolves: "What is React's SSR maturity?" + "What is Vue's SSR maturity?"
+   + "What are enterprise adoption rates?" + "Which fits a 10-person team?"
+   Then synthesizes from verified facts only.
 ```
 
 **Result: 50%+ accuracy improvement on multi-hop prompts.**
@@ -54,27 +35,121 @@ Your Prompt
 
 ## How It Works
 
-### 1. Triage — Skip the pipeline for simple stuff
-Not every prompt needs decomposition. ThinkGraph classifies your prompt and skips the pipeline for trivial or single-hop questions. **Saves tokens.**
-
-### 2. Decompose — Build a dependency graph
-Breaks the prompt into atomic sub-questions with explicit dependencies. Shows you the proposed decomposition before doing anything.
-
 ```
-"Compare React and Vue for enterprise SSR dashboard"
-
-Becomes:
-  Q1: What is React's SSR maturity?           (independent)
-  Q2: What is Vue's SSR maturity?              (independent)
-  Q3: What are enterprise adoption rates?       (independent)
-  Q4: Given Q1-Q3, which fits a 10-person team? (depends on Q1, Q2, Q3)
+Your Prompt
+    │
+    ▼
+┌─────────┐     ┌───────────┐     ┌──────────┐     ┌────────────┐     ┌──────────────┐
+│ TRIAGE  │────>│ DECOMPOSE │────>│  RESOLVE  │────>│ SELF-CONSIS│────>│  SYNTHESIZE  │
+│         │     │           │     │           │     │   TENCY    │     │              │
+│ Is this │     │ Emit DAG  │     │ Answer    │     │  VOTE (if  │     │ Build answer │
+│ complex?│     │ of atomic │     │ each      │     │  enabled)  │     │ from verified│
+│         │     │ sub-Qs    │     │ sub-Q in  │     │            │     │ facts only   │
+│ Skip if │     │ with deps │     │ topo order│     │ Multiple   │     │              │
+│ trivial │     │           │     │           │     │ attempts → │     │              │
+│         │     │           │     │ Web search│     │ centroid   │     │              │
+└─────────┘     └───────────┘     └──────────┘     └────────────┘     └──────────────┘
 ```
 
-### 3. Resolve — Answer each sub-fact
-Each atomic question gets answered with a confidence score. Low-confidence facts are flagged or sent to web search. Results are cached for reuse.
+---
 
-### 4. Synthesize — Build the real answer
-Only verified facts feed the final answer. No hallucinated data. Missing facts are explicitly called out.
+## Features
+
+### Core Protocol (5-stage pipeline)
+| Stage | What it does |
+|:------|:-------------|
+| **Triage** | Classify prompt: trivial / single-hop / multi-hop / planning / creative |
+| **Decompose** | Break into atomic sub-questions with explicit dependency DAG |
+| **Resolve** | Answer each node in topological order, with caching |
+| **Synthesize** | Build final answer from verified facts only |
+| **Present** | Answer with uncertainty notes if any fact was low-confidence |
+
+### Self-Consistency Voting
+Run 2-3 synthesis attempts, vote on the most consistent one via **Jaccard centroid**. Catches hallucinations without extra LLM calls.
+
+```bash
+python thinkgraph.py vote "answer variant 1" "answer variant 2" "answer variant 3"
+# {"winner": "...", "score": 0.72, "response_count": 3}
+```
+
+### Web Grounding (DuckDuckGo — zero API key)
+Auto-search for low-confidence facts. No API key needed — pure HTTP + HTML parsing.
+
+```bash
+python thinkgraph.py web-search "React 19 streaming SSR benchmark" --num-results 5
+```
+
+### Prompt Compression (TF-IDF sentence extraction)
+Compress long context before feeding synthesis. Keeps the most important sentences by TF-IDF weight.
+
+```bash
+python thinkgraph.py compress long_text.txt --ratio 0.4
+# Compressed: 200 -> 80 words (kept 40%)
+```
+
+### Dynamic DAG Pruning
+After resolving parent nodes, automatically prune children whose questions are already answered by their parents.
+
+```bash
+python thinkgraph.py prune-dag graph.json --facts facts.json --prompt "your original question"
+```
+
+### A/B Testing Mode
+Score answers on keyword recall, precision, claim count, and uncertainty markers.
+
+```bash
+python thinkgraph.py ab-score "React has better SSR support" \
+  --ground-truth "React and Vue both support SSR with React 18 offering streaming"
+# keyword_recall: 50.00%  precision: 71.40%
+```
+
+### Plugin Hooks
+Register custom resolve functions (API calls, database lookups, shell commands).
+
+```bash
+python thinkgraph.py plugin-register my_api <<'EOF'
+def my_api(question, ctx):
+    return {"claim": api.lookup(question), "confidence": 0.95}
+EOF
+python thinkgraph.py plugin-list
+# shell, weblookup, my_api
+```
+
+### Export Formats
+Export pipeline results as JSON, YAML, or Markdown report.
+
+```bash
+python thinkgraph.py export results.json --format markdown > report.md
+```
+
+### MCP Server (7 tools)
+Expose ThinkGraph as an MCP server. Compatible with Claude Desktop, Cursor, and any MCP client.
+
+```bash
+python mcp/thinkgraph_mcp.py
+```
+
+Configure in your MCP client:
+```json
+{
+  "mcpServers": {
+    "thinkgraph": {
+      "command": "python",
+      "args": ["/path/to/mcp/thinkgraph_mcp.py"]
+    }
+  }
+}
+```
+
+| MCP Tool | Description |
+|:---------|:------------|
+| `thinkgraph_triage` | Classify prompt complexity |
+| `thinkgraph_validate_dag` | Validate DAG, get execution batches |
+| `thinkgraph_vote` | Self-consistency voting |
+| `thinkgraph_web_search` | DuckDuckGo web search |
+| `thinkgraph_cache_get` | Look up cached facts |
+| `thinkgraph_cache_set` | Store resolved facts |
+| `thinkgraph_tokens` | Estimate token count |
 
 ---
 
@@ -82,75 +157,90 @@ Only verified facts feed the final answer. No hallucinated data. Missing facts a
 
 | Agent | Setup | Auto-loaded? |
 |:------|:------|:------------|
-| **OpenCode** | `.opencode/skills/thinkgraph/SKILL.md` | Yes |
-| **Claude Code** | `~/.claude/skills/thinkgraph/SKILL.md` | Yes |
-| **Cursor** | `.cursor/rules/thinkgraph.mdc` | No (install) |
-| **Codex** | `AGENTS.md` section | No (install) |
-| **Copilot** | `.github/copilot-instructions.md` | No (install) |
-| **Gemini CLI** | `GEMINI.md` section | No (install) |
+| **OpenCode** | `.opencode/skills/thinkgraph/SKILL.md` | ✅ Yes |
+| **Claude Code** | `~/.claude/skills/thinkgraph/SKILL.md` | ✅ Yes |
+| **Cursor** | `.cursor/rules/thinkgraph.mdc` | Via install script |
+| **Codex** | `AGENTS.md` section | Via install script |
+| **Copilot** | `.github/copilot-instructions.md` | Via install script |
+| **Gemini CLI** | `GEMINI.md` section | Via install script |
 
 ---
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/Mayne-X/thinkgraph.git
 cd thinkgraph
 
-# Auto-install adapters for all detected agents
+# Install adapters for all detected agents
 python install.py
 
-# Preview what would be installed (dry run)
+# Or dry-run first
 python install.py --dry-run
 
-# Install for specific agents only
-python install.py --agents opencode,codex
+# Restart your agent. ThinkGraph activates automatically on complex prompts.
 ```
-
-That's it. Restart your agent and ThinkGraph activates on complex prompts.
 
 ---
 
-## Helper CLI
-
-Optional Python tool for deterministic bookkeeping. **Never calls an LLM** — all reasoning stays in your agent.
+## CLI Reference
 
 ```bash
-# Classify prompt complexity
+# Core pipeline
 python thinkgraph.py triage "compare React and Vue"
-
-# Validate a DAG for cycles and depth
 python thinkgraph.py validate-dag graph.json
-
-# Cache a resolved fact
-python thinkgraph.py cache-set "what is react ssr maturity" "React 18+ has streaming SSR" 0.92
-
-# Look up cached facts
 python thinkgraph.py cache-get "what is react ssr maturity"
+python thinkgraph.py tokens "your text"
 
-# Count tokens (heuristic)
-python thinkgraph.py tokens "your text here"
-
-# Build synthesis fact-sheet from resolved nodes
-python thinkgraph.py aggregate facts.json
+# New features
+python thinkgraph.py vote "resp1" "resp2" "resp3"
+python thinkgraph.py web-search "query" --num-results 5
+python thinkgraph.py compress file.txt --ratio 0.4
+python thinkgraph.py prune-dag graph.json --facts facts.json
+python thinkgraph.py ab-score "answer" --ground-truth "reference"
+python thinkgraph.py export results.json --format markdown
+python thinkgraph.py plugin-list
+python thinkgraph.py plugin-register myname "python code"
 ```
 
 ---
 
-## Token Budget
+## Token Budgets
 
-ThinkGraph enforces strict token budgets at every stage to minimize waste:
-
-| Stage | Max Tokens |
-|:------|:-----------|
+| Stage | Max |
+|:------|:----|
 | Triage | 50 |
 | Decompose | 200 |
 | Per sub-question | 300 |
 | Synthesize | 600 |
-| **Hard ceiling** | **4x a direct answer** |
+| **Hard ceiling** | **4× direct answer** |
 
-If the pipeline exceeds the ceiling, it aborts and answers directly. **You never pay more than 4x for a guaranteed improvement.**
+Pipeline aborts to direct answer if ceiling is breached.
+
+---
+
+## Performance Optimizations
+
+- **Precompiled regex** — all patterns compiled once at import, not per-call
+- **LRU memoization** — `normalize_question`, `question_hash`, `estimate_tokens`, and `compute_term_freq` are all cached
+- **Global cache** — facts persist at `~/.thinkgraph/cache.json` across projects and sessions
+- **Unicode-safe output** — all CLI output uses `sys.stdout.write` to avoid cp1252 encoding errors
+- **Efficient data structures** — sets for membership, tuples for cached composite values
+
+---
+
+## Tests
+
+```bash
+# All tests
+python tests/test_golden.py      # 15/15 passing — triage, normalization, hashing
+python tests/test_new_features.py # 14/14 passing — voting, web search, MCP server
+python tests/benchmark.py        # 10 prompts — quality scoring (compression 70%, vote 64%)
+
+# Quick smoke test
+python cli/thinkgraph.py triage "compare React and Vue"
+python cli/thinkgraph.py vote "React is fast" "React is very fast" "React is quick"
+```
 
 ---
 
@@ -158,67 +248,68 @@ If the pipeline exceeds the ceiling, it aborts and answers directly. **You never
 
 ```
 thinkgraph/
-├── SKILL.md                  # The canonical protocol (start here)
+├── SKILL.md                    # Canonical protocol (the source of truth)
 ├── protocol/
-│   ├── prompts.md            # Verbatim prompt templates for each stage
-│   ├── dag.md                # DAG schema, topo-sort pseudocode, cache format
-│   └── questions.md          # Interactive question templates (onboarding + per-invocation)
+│   ├── prompts.md              # Verbatim prompt templates for each stage
+│   ├── dag.md                  # DAG schema, topo-sort pseudocode, cache format
+│   └── questions.md            # Onboarding + per-invocation question templates
 ├── adapters/
-│   ├── opencode/SKILL.md     # OpenCode skill
-│   ├── claude/SKILL.md       # Claude Code skill (also auto-loaded by OpenCode)
-│   ├── cursor/thinkgraph.mdc # Cursor rules
-│   ├── codex/AGENTS.md       # Codex section
-│   ├── copilot/              # Copilot section
-│   └── gemini/GEMINI.md      # Gemini CLI section
+│   ├── opencode/SKILL.md       # OpenCode skill
+│   ├── claude/SKILL.md         # Claude Code (auto-loaded by OpenCode too)
+│   ├── cursor/thinkgraph.mdc    # Cursor rules
+│   ├── codex/AGENTS.md          # Codex section
+│   ├── copilot/                # Copilot section
+│   └── gemini/GEMINI.md        # Gemini CLI section
 ├── cli/
-│   └── thinkgraph.py         # Helper CLI (Python 3.8+, stdlib only, zero deps)
-├── install.py                # Multi-agent installer (auto-detect, idempotent)
+│   └── thinkgraph.py            # Helper CLI (Python 3.8+, stdlib only)
+├── mcp/
+│   ├── thinkgraph_mcp.py        # MCP server (JSON-RPC 2.0 over stdio)
+│   └── README.md               # MCP setup guide
+├── .github/workflows/
+│   └── thinkgraph.yml          # GitHub Action — auto-analyze issues
 ├── tests/
-│   └── test_golden.py        # Golden prompt tests (15/15 passing)
-└── LICENSE                   # MIT
+│   ├── test_golden.py          # 15 tests
+│   ├── test_new_features.py    # 14 tests
+│   └── benchmark.py            # Quality benchmark suite
+├── install.py                   # Multi-agent installer (auto-detect, idempotent)
+├── README.md                   # This file
+└── LICENSE
 ```
 
 ---
 
 ## Roadmap
 
-Features planned for future releases:
+| # | Feature | Status | Notes |
+|:--|:--------|:-------|:------|
+| 1 | **Self-consistency voting** | ✅ Done | Jaccard centroid, `thinkgraph.py vote` |
+| 2 | **Web grounding** | ✅ Done | DuckDuckGo HTML, zero API key, `web-search` |
+| 3 | **MCP server** | ✅ Done | JSON-RPC 2.0 stdio, 7 tools, `mcp/thinkgraph_mcp.py` |
+| 4 | **Prompt compression** | ✅ Done | TF-IDF sentence extraction, `compress` |
+| 5 | **Benchmark suite** | ✅ Done | 10 prompts, quality scoring, `tests/benchmark.py` |
+| 6 | **Cache sync** | ✅ Done | Global `~/.thinkgraph/cache.json`, per-project `.pcg/` |
+| 7 | **Streaming support** | 🔜 Planned | Incremental DAG + fact emission |
+| 8 | **Multi-model routing** | 🔜 Planned | Cheap sub-nodes, expensive synthesis |
+| 9 | **Dynamic DAG pruning** | ✅ Done | Auto-remove nodes whose parents answer them |
+| 10 | **Export formats** | ✅ Done | JSON, YAML, Markdown |
+| 11 | **Recursive depth (3+)** | 🔜 Planned | Max depth configurable, budget warnings |
+| 12 | **A/B testing mode** | ✅ Done | `ab-score`, keyword recall + precision |
+| 13 | **Plugin hooks** | ✅ Done | Custom resolve fns, `plugin-register` |
+| 14 | **CLI interactive mode** | 🔜 Planned | `thinkgraph interactive` REPL |
+| 15 | **GitHub Action** | ✅ Done | Auto-comment on issues, `thinkgraph.yml` |
 
-| # | Feature | Description | Status |
-|:--|:--------|:------------|:-------|
-| 1 | **Self-consistency voting** | Run final synthesis 2-3x, majority-vote the answer to catch hallucinations | Planned |
-| 2 | **Web grounding** | Auto-search for low-confidence nodes using DuckDuckGo API (zero API key needed) | Planned |
-| 3 | **MCP server** | Expose ThinkGraph as an MCP tool so any agent can call it as a native function | Planned |
-| 4 | **Prompt compression** | Smart summarizer that shrinks context before feeding the synthesis stage | Planned |
-| 5 | **Benchmark suite** | 50+ golden prompts with expected DAGs and answers, automated quality scoring | Planned |
-| 6 | **Cache sync** | Redis/SQLite adapter for cross-project and cross-team fact sharing | Planned |
-| 7 | **Streaming support** | Emit DAG and facts incrementally so agents can display live progress | Planned |
-| 8 | **Multi-model routing** | Run cheap sub-nodes on Haiku/Mini, synthesis on expensive model | Planned |
-| 9 | **Dynamic DAG pruning** | If a node becomes irrelevant after its parent resolves, skip it automatically | Planned |
-| 10 | **Export formats** | Output pipeline results as Markdown report, JSON, or structured YAML | Planned |
-| 11 | **Recursive depth** | Allow depth 3+ for extremely complex prompts with budget warnings | Planned |
-| 12 | **A/B testing mode** | Run both direct and pipeline answers, compare quality metrics, log results | Planned |
-| 13 | **Plugin hooks** | Let users inject custom resolve functions (API calls, database lookups, etc.) | Planned |
-| 14 | **CLI interactive mode** | `thinkgraph interactive` launches a REPL for step-by-step walkthrough | Planned |
-| 15 | **GitHub Action** | CI step that runs ThinkGraph on issue titles to auto-generate implementation plans | Planned |
+✅ = Implemented   🔜 = Planned   🚧 = In progress
 
 ---
 
 ## Contributing
 
-Contributions welcome. Open an issue or PR.
-
-```bash
-# Run tests
-python tests/test_golden.py
-
-# Test CLI commands
-python thinkgraph.py triage "your prompt"
-python thinkgraph.py validate-dag your_dag.json
-```
+1. Fork → branch → commit → PR
+2. Run tests: `python tests/test_golden.py && python tests/test_new_features.py`
+3. Benchmark: `python tests/benchmark.py`
 
 ---
 
 ## License
 
-MIT - do whatever you want.
+MIT — do whatever you want.

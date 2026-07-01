@@ -12,11 +12,13 @@ Commands:
     triage "prompt"                       Classify prompt complexity
     decompose "prompt" [--max-nodes N]    Emit DAG JSON
     validate-dag graph.json               Validate a DAG file
-    normalize "question"                  Normalize + hash a question
-    cache-get "question"                  Look up cached fact
+    normalize "question"                   Normalize + hash a question
+    cache-get "question"                   Look up cached fact
     cache-set "question" "claim" [conf]   Store a cached fact
-    aggregate facts.json                  Build synthesis fact-sheet
-    tokens "text"                         Estimate token count
+    aggregate facts.json                   Build synthesis fact-sheet
+    tokens "text"                          Estimate token count
+    vote "resp1" "resp2" [...]             Self-consistency voting (pick most consistent)
+    web-search "query" [--num-results N]  Web search via DuckDuckGo HTML
 """
 
 import argparse
@@ -381,9 +383,117 @@ def aggregate_facts(facts_path: str) -> str:
         if parents:
             note += f", derived from {parents}"
 
-        lines.append(f"{q_id} → {claim} (conf: {conf:.2f}{note})")
+        lines.append(f"{q_id} -> {claim} (conf: {conf:.2f}{note})")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Self-consistency voting
+# ---------------------------------------------------------------------------
+
+def jaccard_similarity(text1: str, text2: str) -> float:
+    """Compute Jaccard similarity between two texts based on word sets."""
+    words1 = set(re.findall(r"\w+", text1.lower()))
+    words2 = set(re.findall(r"\w+", text2.lower()))
+    if not words1 and not words2:
+        return 0.0
+    intersection = words1 & words2
+    union = words1 | words2
+    return len(intersection) / len(union) if union else 0.0
+
+
+def self_consistency_vote(responses: List[str]) -> Dict[str, Any]:
+    """Pick the most self-consistent response from a list of LLM completions.
+
+    Algorithm: pairwise Jaccard similarity. The response with the highest
+    average similarity to all others is the most consistent (centroid).
+    Returns the winner, score, and similarity matrix.
+    """
+    if not responses:
+        return {"winner": "", "score": 0.0, "index": -1, "similarities": []}
+    if len(responses) == 1:
+        return {"winner": responses[0], "score": 1.0, "index": 0, "similarities": [1.0]}
+
+    n = len(responses)
+    scores: List[float] = []
+    for i in range(n):
+        sims = [jaccard_similarity(responses[i], responses[j]) for j in range(n) if j != i]
+        scores.append(sum(sims) / len(sims) if sims else 0.0)
+
+    best_idx = scores.index(max(scores))
+    return {
+        "winner": responses[best_idx],
+        "score": round(scores[best_idx], 4),
+        "index": best_idx,
+        "all_scores": [round(s, 4) for s in scores],
+        "response_count": n,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Web grounding (DuckDuckGo HTML search — zero API key, stdlib only)
+# ---------------------------------------------------------------------------
+
+def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
+    """Search the web via DuckDuckGo HTML (no API key required).
+
+    Returns a list of {title, url, snippet} dicts.
+    Falls back gracefully if network is unavailable.
+    """
+    try:
+        import urllib.request
+
+        url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        results: List[Dict[str, str]] = []
+        # DuckDuckGo HTML result blocks
+        # Each result: <a class="result__a" href="URL">TITLE</a>
+        #              <a class="result__snippet" href="...">SNIPPET</a>
+        import html as html_lib
+
+        # Find result blocks
+        raw_blocks = re.findall(
+            r'<a class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)</a>',
+            html,
+        )
+        snippet_blocks = re.findall(
+            r'<a class="result__snippet"[^>]*>([^<]+)</a>',
+            html,
+        )
+
+        for i, (url, title_raw) in enumerate(raw_blocks[:num_results]):
+            title = html_lib.unescape(title_raw.strip())
+            snippet = ""
+            if i < len(snippet_blocks):
+                snippet = html_lib.unescape(snippet_blocks[i].strip())
+            results.append({"title": title, "url": url, "snippet": snippet})
+
+        return {
+            "query": query,
+            "count": len(results),
+            "results": results,
+        }
+    except Exception as e:
+        return {
+            "query": query,
+            "count": 0,
+            "results": [],
+            "error": str(e),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +564,28 @@ def cmd_aggregate(args):
     print(sheet)
 
 
+def cmd_vote(args):
+    responses = [r.strip() for r in args.responses if r.strip()]
+    result = self_consistency_vote(responses)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_web_search(args):
+    result = web_search(args.query, num_results=args.num_results)
+    # Print human-readable summary
+    print(f"Search: {result['query']}")
+    if result.get("error"):
+        print(f"  Error: {result['error']}")
+    else:
+        for r in result["results"]:
+            print(f"  - {r['title']}")
+            print(f"    {r['url']}")
+            if r["snippet"]:
+                print(f"    {r['snippet'][:150]}...")
+    # Always also print raw JSON for piping
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="thinkgraph",
@@ -508,6 +640,17 @@ def main():
     p_tok = sub.add_parser("tokens", help="Estimate token count")
     p_tok.add_argument("text", help="Text to count tokens for")
     p_tok.set_defaults(func=cmd_tokens)
+
+    # vote (self-consistency)
+    p_vote = sub.add_parser("vote", help="Self-consistency voting — pick most consistent response")
+    p_vote.add_argument("responses", nargs="+", help="Multiple LLM responses to compare")
+    p_vote.set_defaults(func=cmd_vote)
+
+    # web-search
+    p_search = sub.add_parser("web-search", help="Web search via DuckDuckGo HTML (no API key)")
+    p_search.add_argument("query", help="Search query")
+    p_search.add_argument("--num-results", type=int, default=5, help="Number of results (default: 5)")
+    p_search.set_defaults(func=cmd_web_search)
 
     args = parser.parse_args()
     args.func(args)
